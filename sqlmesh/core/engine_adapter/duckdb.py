@@ -27,7 +27,7 @@ if t.TYPE_CHECKING:
 @set_catalog(override_mapping={"_get_data_objects": CatalogSupport.REQUIRES_SET_CATALOG})
 class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin, RowDiffMixin):
     DIALECT = "duckdb"
-    SUPPORTS_TRANSACTIONS = False
+    SUPPORTS_TRANSACTIONS = True
     SCHEMA_DIFFER_KWARGS = {
         "parameterized_type_defaults": {
             exp.DataType.build("DECIMAL", dialect=DIALECT).this: [(18, 3), (0,)],
@@ -47,29 +47,33 @@ class DuckDBEngineAdapter(LogicalMergeMixin, GetCurrentCatalogFromFunctionMixin,
         self.execute(exp.Use(this=exp.to_identifier(catalog)))
 
     def _create_catalog(self, catalog_name: exp.Identifier) -> None:
+        # ATTACH / CREATE DATABASE cannot run inside an open DuckDB transaction.
         if not self._is_motherduck:
             db_filename = f"{catalog_name.output_name}.db"
             self.execute(
                 exp.Attach(
                     this=exp.alias_(exp.Literal.string(db_filename), catalog_name), exists=True
-                )
+                ),
+                skip_transaction=True,
             )
         else:
             self.execute(
-                exp.Create(this=exp.Table(this=catalog_name), kind="DATABASE", exists=True)
+                exp.Create(this=exp.Table(this=catalog_name), kind="DATABASE", exists=True),
+                skip_transaction=True,
             )
 
     def _drop_catalog(self, catalog_name: exp.Identifier) -> None:
         if not self._is_motherduck:
             db_file_path = Path(f"{catalog_name.output_name}.db")
-            self.execute(exp.Detach(this=catalog_name, exists=True))
+            self.execute(exp.Detach(this=catalog_name, exists=True), skip_transaction=True)
             if db_file_path.exists():
                 db_file_path.unlink()
         else:
             self.execute(
                 exp.Drop(
                     this=exp.Table(this=catalog_name), kind="DATABASE", cascade=True, exists=True
-                )
+                ),
+                skip_transaction=True,
             )
 
     def _df_to_source_queries(

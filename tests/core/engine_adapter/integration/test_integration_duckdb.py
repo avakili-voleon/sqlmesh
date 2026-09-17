@@ -2,12 +2,12 @@ import typing as t
 import pytest
 from threading import current_thread, Thread
 import random
-from sqlglot import exp
+from sqlglot import exp, parse_one
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from sqlmesh.core.config.connection import DuckDBConnectionConfig
 from sqlmesh.utils.connection_pool import ThreadLocalSharedConnectionPool
+from sqlmesh.utils.date import to_ds
 
 pytestmark = [pytest.mark.duckdb, pytest.mark.engine, pytest.mark.slow]
 
@@ -139,3 +139,59 @@ def test_connector_config_from_multiple_connections(tmp_path: Path):
         assert future.result()
 
     pool.close_all()
+
+
+def test_transaction_catalog_overwrite_and_columns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ATTACH writes `{catalog}.db` relative to cwd.
+    monkeypatch.chdir(tmp_path)
+
+    adapter = DuckDBConnectionConfig().create_engine_adapter()
+    assert adapter.SUPPORTS_TRANSACTIONS is True
+
+    catalog = "txn_catalog"
+    table = f"{catalog}.main.test_table"
+    columns_to_types = {
+        "id": exp.DataType.build("INT"),
+        "trdate": exp.DataType.build("DATE"),
+    }
+
+    def time_formatter(x, _):
+        return exp.Literal.string(to_ds(x))
+
+    adapter.create_catalog(catalog)
+    adapter.create_table(table, columns_to_types)
+    adapter.insert_append(
+        table,
+        parse_one(
+            "SELECT 1 AS id, DATE '2022-01-01' AS trdate UNION ALL SELECT 2, DATE '2022-01-02'"
+        ),
+        columns_to_types,
+    )
+
+    with adapter.transaction():
+        adapter.insert_overwrite_by_time_partition(
+            table,
+            parse_one("SELECT 99 AS id, DATE '2022-01-02' AS trdate"),
+            start="2022-01-02",
+            end="2022-01-02",
+            time_column="trdate",
+            time_formatter=time_formatter,
+            target_columns_to_types=columns_to_types,
+        )
+        adapter._connection_pool.rollback()
+
+    assert adapter.fetchall(f"SELECT id FROM {table} ORDER BY id") == [(1,), (2,)]
+
+    adapter.insert_overwrite_by_time_partition(
+        table,
+        parse_one("SELECT 99 AS id, DATE '2022-01-02' AS trdate"),
+        start="2022-01-02",
+        end="2022-01-02",
+        time_column="trdate",
+        time_formatter=time_formatter,
+        target_columns_to_types=columns_to_types,
+    )
+    assert adapter.fetchall(f"SELECT id FROM {table} ORDER BY id") == [(1,), (99,)]
+    assert list(adapter.columns(table)) == ["id", "trdate"]
