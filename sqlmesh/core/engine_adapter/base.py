@@ -1512,8 +1512,12 @@ class EngineAdapter:
         self, table_name: TableName, include_pseudo_columns: bool = False
     ) -> t.Dict[str, exp.DataType]:
         """Fetches column names and types for the target table."""
-        self.execute(exp.Describe(this=exp.to_table(table_name), kind="TABLE"))
-        describe_output = self.cursor.fetchall()
+        # Fetch inside the same transaction as DESCRIBE. execute() commits on exit when
+        # SUPPORTS_TRANSACTIONS is True, and some engines (DuckDB) clear the cursor then.
+        describe_output = self.fetchall(
+            exp.Describe(this=exp.to_table(table_name), kind="TABLE"),
+            quote_identifiers=True,
+        )
         return {
             # Note: MySQL  returns the column type as bytes.
             column_name: exp.DataType.build(_decoded_str(column_type), dialect=self.dialect)
@@ -2620,13 +2624,19 @@ class EngineAdapter:
         ignore_unsupported_errors: bool = False,
         quote_identifiers: bool = True,
         track_rows_processed: bool = False,
+        skip_transaction: bool = False,
         **kwargs: t.Any,
     ) -> None:
-        """Execute a sql query."""
+        """Execute a sql query.
+
+        Args:
+            skip_transaction: If True, do not wrap the statements in a new transaction. Used for
+                statements some engines forbid inside a transaction (e.g. DuckDB ATTACH).
+        """
         to_sql_kwargs = (
             {"unsupported_level": ErrorLevel.IGNORE} if ignore_unsupported_errors else {}
         )
-        with self.transaction():
+        with self.transaction(condition=not skip_transaction):
             for e in ensure_list(expressions):
                 if isinstance(e, exp.Expr):
                     self._check_identifier_length(e)

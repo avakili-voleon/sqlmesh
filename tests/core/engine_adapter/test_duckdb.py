@@ -40,6 +40,23 @@ def test_table_exists(adapter: EngineAdapter, duck_conn):
     assert adapter.table_exists("tbl")
 
 
+def test_columns(adapter: EngineAdapter, duck_conn):
+    adapter.create_table(
+        "test_table",
+        {
+            "id": exp.DataType.build("INT"),
+            "trdate": exp.DataType.build("DATE"),
+        },
+    )
+
+    # columns() used to fetch DESCRIBE after execute() committed, which cleared the
+    # DuckDB cursor once SUPPORTS_TRANSACTIONS was True.
+    cols = adapter.columns("test_table")
+    assert list(cols) == ["id", "trdate"]
+    with adapter.transaction():
+        assert list(adapter.columns("test_table")) == ["id", "trdate"]
+
+
 def test_create_table(adapter: EngineAdapter, duck_conn):
     columns_to_types = {
         "cola": exp.DataType.build("INT"),
